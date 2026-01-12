@@ -412,7 +412,7 @@ def clean_value(col: str, val: Any) -> Any:
         return coerce_datetime(val)
     return val
 
-def row_to_payload(row: pd.Series, trace_lookup: Dict[str, Tuple[Optional[str], Optional[str]]]) -> Dict[str, Any]:
+def row_to_payload(row: pd.Series) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
     for idx, db_col in EXCEL_TO_DB_BY_INDEX:
         if idx >= len(row):
@@ -426,9 +426,6 @@ def row_to_payload(row: pd.Series, trace_lookup: Dict[str, Tuple[Optional[str], 
         payload["board_top"] = ""
     if payload.get("board_bottom") is None:
         payload["board_bottom"] = ""
-
-    # ✅ verify + fix FA / board number using traceability source
-    payload = check_row_fa_and_board_number(payload, trace_lookup)
 
     return payload
 
@@ -524,43 +521,9 @@ def build_upsert_sql(columns: List[str]) -> str:
 def main():
     df = read_excel_as_dataframe(FILE, SHEET, START_ROW)
 
-    # =========================
-    # PRE-CHECK FOR DUPLICATES / COLLISIONS
-    # =========================
-    offending = build_offending_numbers_df(
-        df=df,
-        top_idx=BOARD_TOP_IDX,
-        bottom_idx=BOARD_BOTTOM_IDX,
-        start_row_excel_1based=START_ROW,
-    )
-
-    if not offending.empty:
-        out_path = write_offending_numbers_csv(offending, FILE)
-
-        print("❌ Duplicate / collision check failed for board_top / board_bottom.")
-        print(f"Found {len(offending)} offending numbers.")
-        print(f"Wrote details to: {out_path}")
-        # show a small preview in stdout
-        preview_cols = ["number", "top_count", "bottom_count", "total_count", "appears_in_both", "reason"]
-        print(offending[preview_cols].head(20).to_string(index=False))
-
-    # collect all barcodes from the raw df (excel columns 1 and 2)
-    top_barcodes = df.iloc[:, BOARD_TOP_IDX].map(normalize_board_number).dropna().tolist()
-    bottom_barcodes = df.iloc[:, BOARD_BOTTOM_IDX].map(normalize_board_number).dropna().tolist()
-    all_barcodes = top_barcodes + bottom_barcodes
-
-    trace_lookup: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-    if all_barcodes:
-        trace_conn = get_trace_connection()
-        try:
-            trace_lookup = fetch_trace_info_for_barcodes(trace_conn, all_barcodes, chunk_size=1000)
-            print(f"Trace lookup loaded: {len(trace_lookup)} barcodes resolved.")
-        finally:
-            trace_conn.close()
-
     payloads: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
-        payloads.append(row_to_payload(row, trace_lookup))
+        payloads.append(row_to_payload(row))
     if not payloads:
         print("No rows found after parsing.")
         return
@@ -574,7 +537,6 @@ def main():
     try:
         clear_target_table(conn, "circuit_boards")
         print("Cleared `circuit_boards` before upload.")
-
 
         sql = build_upsert_sql(all_columns)
         with conn.cursor() as cur:
