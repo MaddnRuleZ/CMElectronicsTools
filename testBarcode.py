@@ -1,7 +1,10 @@
+import logging
+
 from dotenv import load_dotenv
 import os
 import pyodbc
 from typing import Optional, Tuple
+logger = logging.getLogger(__name__)
 
 TRACE_SQL = """
 WITH ranked AS (
@@ -63,22 +66,44 @@ def get_trace_connection() -> pyodbc.Connection:
 
 def fetch_losname_und_leiterplatte(conn: pyodbc.Connection, barcode: str) -> Optional[Tuple[str, str]]:
     bc = (barcode or "").strip()
+    logger.debug("fetch_losname_und_leiterplatte: start | barcode_raw=%r | barcode_clean=%r", barcode, bc)
+
     if not bc:
+        logger.debug("fetch_losname_und_leiterplatte: empty barcode -> return None")
         return None
 
     sql = TRACE_SQL.format(placeholders="?")
+    logger.debug("fetch_losname_und_leiterplatte: executing trace lookup | barcode=%r", bc)
 
-    cur = conn.cursor()
-    cur.execute(sql, (bc,))
-    row = cur.fetchone()
-    if not row:
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, (bc,))
+        row = cur.fetchone()
+    except pyodbc.Error:
+        logger.exception("fetch_losname_und_leiterplatte: pyodbc error during lookup | barcode=%r", bc)
+        return None
+    except Exception:
+        logger.exception("fetch_losname_und_leiterplatte: unexpected error during lookup | barcode=%r", bc)
         return None
 
-    _barcode, losname, leiterplatte = row
+    if not row:
+        logger.debug("fetch_losname_und_leiterplatte: no row found | barcode=%r", bc)
+        return None
+
+    try:
+        _barcode, losname, leiterplatte = row
+    except Exception:
+        logger.exception("fetch_losname_und_leiterplatte: unexpected row shape | barcode=%r | row=%r", bc, row)
+        return None
+
     los = losname.strip() if isinstance(losname, str) else ("" if losname is None else str(losname))
     lei = leiterplatte.strip() if isinstance(leiterplatte, str) else ("" if leiterplatte is None else str(leiterplatte))
-    return (los, lei)
 
+    logger.debug(
+        "fetch_losname_und_leiterplatte: success | barcode=%r | losname=%r | leiterplatte=%r",
+        bc, los[:120], lei[:120]
+    )
+    return (los, lei)
 
 def main() -> None:
     barcode = "CM734649"
