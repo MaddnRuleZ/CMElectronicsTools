@@ -268,21 +268,6 @@ def build_upsert_sql(columns: List[str]) -> str:
         VALUES ({placeholders})
         ON DUPLICATE KEY UPDATE {updates}
     """.strip()
-
-    # --- DEBUG LOGGING ---
-    try:
-        print("=== UPSERT SQL DEBUG ===")
-        print("Column count:", len(columns))
-        if "board_erfasst_am" in columns:
-            print("board_erfasst_am included: YES, index:", columns.index("board_erfasst_am"))
-        else:
-            print("board_erfasst_am included: NO")
-        print("SQL preview (first 400 chars):")
-        print(sql[:400] + ("..." if len(sql) > 400 else ""))
-        print("========================")
-    except Exception as _:
-        pass
-
     return sql
 
 def main():
@@ -292,34 +277,17 @@ def main():
     df = read_excel_as_dataframe(FILE, SHEET, START_ROW).head(50)
 
     payloads: List[Dict[str, Any]] = []
-    for i, (_, row) in enumerate(df.iterrows()):
-        p = row_to_payload(row)
+    for _, row in df.iterrows():
+        payloads.append(row_to_payload(row))
 
-        if i < 20:  # sample
-            v = p.get("board_erfasst_am")
-            raw = row.iloc[0]  # excel col index 0 in your mapping
-            print(f"[ROW {i}] raw={raw!r} ({type(raw)})  -> parsed={v!r} ({type(v)})")
-
-        payloads.append(p)
+    if not payloads:
+        print("No rows found after parsing.")
+        return
 
     all_columns = sorted(set().union(*[set(p.keys()) for p in payloads]))
     values = [[p.get(c) for c in all_columns] for p in payloads]
 
     print(f"Prepared {len(values)} rows with {len(all_columns)} columns.")
-
-    # --- DEBUG LOGGING: VALUES FOR board_erfasst_am ---
-    if "board_erfasst_am" in all_columns:
-        idx = all_columns.index("board_erfasst_am")
-        print("=== VALUES DEBUG (board_erfasst_am) ===")
-        print("Index:", idx)
-        for j in range(min(20, len(values))):
-            vv = values[j][idx]
-            print(j, repr(vv), type(vv))
-        print("=======================================")
-    else:
-        print("=== VALUES DEBUG ===")
-        print("board_erfasst_am NOT present in all_columns!")
-        print("====================")
 
     conn = get_connection()
     try:
@@ -327,22 +295,8 @@ def main():
         print("Cleared `circuit_boards` before upload.")
 
         sql = build_upsert_sql(all_columns)
-
         with conn.cursor() as cur:
-            # --- DEBUG LOGGING: RENDERED SQL FOR FIRST ROW ---
-            try:
-                if values:
-                    rendered = cur.mogrify(sql, values[0])
-                    if isinstance(rendered, (bytes, bytearray)):
-                        rendered = rendered.decode("utf-8", errors="replace")
-                    print("=== MOGRIFY DEBUG (first row) ===")
-                    print(rendered[:2000] + ("..." if len(rendered) > 2000 else ""))
-                    print("================================")
-            except Exception as e:
-                print(f"mogrify debug failed: {e}", file=sys.stderr)
-
             cur.executemany(sql, values)
-
         conn.commit()
         print(f"Upserted {len(values)} rows into `circuit_boards`.")
     except Exception as e:
@@ -354,4 +308,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
