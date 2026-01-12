@@ -106,7 +106,7 @@ def fetch_losname_und_leiterplatte(conn: pyodbc.Connection, barcode: str) -> Opt
     return (los, lei)
 
 def main() -> None:
-    barcode = "CM734649"
+    barcode = "CM734652"
 
     try:
         conn = get_trace_connection()
