@@ -37,6 +37,12 @@ FROM ranked
 WHERE rn = 1;
 """.strip()
 
+def _strip_before_backslash(s: str) -> str:
+    s = (s or "").strip()
+    if "\\" in s:
+        return s.split("\\", 1)[1].strip()
+    return s
+
 
 def _norm_s(v) -> str:
     if v is None:
@@ -249,10 +255,15 @@ def main() -> None:
 
                 losname, leiterplatte = info
 
-                fa_new = _norm_s(fa_old) or _norm_s(losname)
-                art_new = _norm_s(art_old) or _norm_s(leiterplatte)
+                fa_old_s = _norm_s(fa_old)
+                art_old_s = _strip_before_backslash(_norm_s(art_old))  # <-- normalize existing value too
 
-                # nothing to set
+                fa_new = fa_old_s or _norm_s(losname)
+
+                # prefer existing, else trace; always strip prefix before "\"
+                art_candidate = art_old_s or _norm_s(leiterplatte)
+                art_new = _strip_before_backslash(art_candidate)  # <-- normalize final value
+
                 if not fa_new and not art_new:
                     skipped_not_found += 1
                     continue
