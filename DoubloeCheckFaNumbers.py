@@ -47,8 +47,7 @@ WHERE rn = 1;
 # =========================
 # Set to None to disable filtering (process all rows that need backfill)
 ONLY_PROCESS_NEWER_THAN_STR: Optional[str] = None
-# Example values:
-UPLOAD_ONLY_NEWER_THAN_STR = "06.12.2025"
+UPLOAD_ONLY_NEWER_THAN_STR = "17.12.2025"
 
 DATE_FIELD_IN_MYSQL = "board_erfasst_am"
 INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING = False
