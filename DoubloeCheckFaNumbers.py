@@ -9,7 +9,7 @@ from typing import Dict, Optional, Tuple, List, Iterable
 from dotenv import load_dotenv
 import pyodbc
 import pymysql
-
+import re
 
 TRACE_SQL = """
 WITH ranked AS (
@@ -36,6 +36,22 @@ SELECT
 FROM ranked
 WHERE rn = 1;
 """.strip()
+
+def _clean_barcode(v) -> str:
+    # strip + collapse all whitespace (incl \r\n\t and weird spaces) + uppercase
+    s = "" if v is None else str(v)
+    s = re.sub(r"\s+", "", s).strip().upper()
+    return s
+
+def _barcode_candidates(v) -> List[str]:
+    b = _clean_barcode(v)
+    if not b:
+        return []
+    cands = [b]
+    # common case: DB has only digits, Trace uses "CM"+digits
+    if b.isdigit() and not b.startswith("CM"):
+        cands.append("CM" + b)
+    return cands
 
 def _strip_before_backslash(s: str) -> str:
     s = (s or "").strip()
@@ -212,17 +228,23 @@ def main() -> None:
         # 2) Decide barcode per row (prefer top, else bottom)
         row_barcode: Dict[int, str] = {}
         barcodes: List[str] = []
+        row_candidates: Dict[int, List[str]] = {}
 
         skipped_no_barcode = 0
         for (row_id, board_top, board_bottom, _fa_old, _art_old) in rows:
-            top = _norm_s(board_top)
-            bottom = _norm_s(board_bottom)
-            barcode = top if top else bottom
-            if not barcode:
+            row_id_i = int(row_id)
+
+            # prefer top; fallback to bottom
+            cands = _barcode_candidates(board_top)
+            if not cands:
+                cands = _barcode_candidates(board_bottom)
+
+            if not cands:
                 skipped_no_barcode += 1
                 continue
-            row_barcode[int(row_id)] = barcode
-            barcodes.append(barcode)
+
+            row_candidates[row_id_i] = cands
+            barcodes.extend(cands)
 
         if not barcodes:
             print(f"Skipped (no barcode): {skipped_no_barcode}")
@@ -244,11 +266,15 @@ def main() -> None:
         with mysql_conn.cursor() as cur:
             for (row_id, _top, _bottom, fa_old, art_old) in rows:
                 row_id_i = int(row_id)
-                barcode = row_barcode.get(row_id_i)
-                if not barcode:
-                    continue
+                cands = row_candidates.get(row_id_i) or []
+                info = None
+                used = ""
+                for bc in cands:
+                    info = lookup.get(bc)
+                    if info:
+                        used = bc
+                        break
 
-                info = lookup.get(barcode)
                 if not info:
                     skipped_not_found += 1
                     continue
