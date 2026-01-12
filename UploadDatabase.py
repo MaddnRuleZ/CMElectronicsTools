@@ -268,15 +268,21 @@ def build_upsert_sql(columns: List[str]) -> str:
     return sql
 
 def main():
+    print("Loading Env")
     load_dotenv()
+    print("Loaded env, generating Payloads")
     df = read_excel_as_dataframe(FILE, SHEET, START_ROW)
 
     payloads: List[Dict[str, Any]] = []
-    for _, row in df.iterrows():
-        payloads.append(row_to_payload(row))
-    if not payloads:
-        print("No rows found after parsing.")
-        return
+    for i, (_, row) in enumerate(df.iterrows()):
+        p = row_to_payload(row)
+
+        if i < 20:  # sample
+            v = p.get("board_erfasst_am")
+            raw = row.iloc[0]  # excel col index 0 in your mapping
+            print(f"[ROW {i}] raw={raw!r} ({type(raw)})  -> parsed={v!r} ({type(v)})")
+
+        payloads.append(p)
 
     all_columns = sorted(set().union(*[set(p.keys()) for p in payloads]))
     values = [[p.get(c) for c in all_columns] for p in payloads]
