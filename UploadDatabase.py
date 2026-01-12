@@ -226,6 +226,9 @@ def row_to_payload(row: pd.Series) -> Dict[str, Any]:
     if payload.get("board_bottom") is None:
         payload["board_bottom"] = ""
 
+    if payload.get("board_erfasst_am") is not None:
+        payload["board_recorded_on"] = payload["board_erfasst_am"]
+
     return payload
 
 def get_connection():
