@@ -348,8 +348,12 @@ def main():
 
     conn = get_connection()
     try:
-        clear_target_table(conn, "circuit_boards")
-        print("Cleared `circuit_boards` before upload.")
+        # Only wipe the table on a full upload (no date filter)
+        if UPLOAD_ONLY_NEWER_THAN_STR is None:
+            clear_target_table(conn, "circuit_boards")
+            print("Cleared `circuit_boards` before upload (full refresh).")
+        else:
+            print("Skipped clearing `circuit_boards` (date filter enabled).")
 
         sql = build_upsert_sql(all_columns)
         with conn.cursor() as cur:
