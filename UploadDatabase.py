@@ -268,6 +268,7 @@ def build_upsert_sql(columns: List[str]) -> str:
     return sql
 
 def main():
+    load_dotenv()
     df = read_excel_as_dataframe(FILE, SHEET, START_ROW)
 
     payloads: List[Dict[str, Any]] = []
