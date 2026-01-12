@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, Optional, Tuple, List
+import time
+from typing import Dict, Optional, Tuple, List, Iterable
 
 from dotenv import load_dotenv
 import pyodbc
@@ -43,6 +44,11 @@ def _norm_s(v) -> str:
     return str(v).strip()
 
 
+def _chunked(items: List[str], size: int) -> Iterable[List[str]]:
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
 def get_trace_connection() -> pyodbc.Connection:
     host = os.getenv("TRACE_HOST")
     db = os.getenv("TRACE_DB")
@@ -72,39 +78,64 @@ def get_trace_connection() -> pyodbc.Connection:
     return pyodbc.connect(conn_str, autocommit=True)
 
 
-def fetch_losname_und_leiterplatte(
+def fetch_trace_info_for_barcodes_paced(
     conn: pyodbc.Connection,
-    barcode: str,
-) -> Optional[Tuple[str, str]]:
+    barcodes: List[str],
+    chunk_size: int = 200,
+    pacing_seconds: float = 0.25,
+) -> Dict[str, Tuple[str, str]]:
     """
-    Returns (Losname, LeiterplatteSuffix) for the given barcode, or None if not found.
-    LeiterplatteSuffix: everything after the first backslash (e.g. "Livetec\\LI008.001_V01" -> "LI008.001_V01")
-    """
-    bc = (barcode or "").strip()
-    if not bc:
-        return None
+    Batched + paced lookup:
+      barcode -> (Losname, LeiterplatteSuffix)
 
-    sql = TRACE_SQL.format(placeholders="?")
+    LeiterplatteSuffix: everything after first backslash (e.g. "Livetec\\LI008.001_V01" -> "LI008.001_V01")
+    """
+    out: Dict[str, Tuple[str, str]] = {}
+    if not barcodes:
+        return out
+
+    # de-dup, keep stable order
+    seen = set()
+    uniq: List[str] = []
+    for b in barcodes:
+        bb = _norm_s(b)
+        if not bb:
+            continue
+        if bb in seen:
+            continue
+        seen.add(bb)
+        uniq.append(bb)
+
     cur = conn.cursor()
-    cur.execute(sql, (bc,))
-    row = cur.fetchone()
-    if not row:
-        return None
 
-    _barcode, losname, leiterplatte = row
+    for i, chunk in enumerate(_chunked(uniq, max(1, int(chunk_size)))):
+        placeholders = ",".join(["?"] * len(chunk))
+        sql = TRACE_SQL.format(placeholders=placeholders)
 
-    los = losname.strip() if isinstance(losname, str) else ("" if losname is None else str(losname))
-    lei = (
-        leiterplatte.strip()
-        if isinstance(leiterplatte, str)
-        else ("" if leiterplatte is None else str(leiterplatte))
-    )
+        # NOTE: pass the sequence as the params argument (NOT *chunk)
+        cur.execute(sql, chunk)
 
-    # cut off everything before the first "\"
-    if "\\" in lei:
-        lei = lei.split("\\", 1)[1]
+        for barcode, losname, leiterplatte in cur.fetchall():
+            bc = _norm_s(barcode)
 
-    return (los, lei)
+            los = losname.strip() if isinstance(losname, str) else ("" if losname is None else str(losname))
+            lei = (
+                leiterplatte.strip()
+                if isinstance(leiterplatte, str)
+                else ("" if leiterplatte is None else str(leiterplatte))
+            )
+
+            # cut off everything before the first "\"
+            if "\\" in lei:
+                lei = lei.split("\\", 1)[1]
+
+            out[bc] = (_norm_s(los), _norm_s(lei))
+
+        # moderate pacing between trace queries (skip sleep after last chunk)
+        if pacing_seconds > 0 and i < (len(uniq) - 1) // max(1, int(chunk_size)):
+            time.sleep(pacing_seconds)
+
+    return out
 
 
 def get_mysql_connection():
@@ -136,10 +167,11 @@ def get_mysql_connection():
 def main() -> None:
     load_dotenv()
 
+    trace_chunk_size = int(os.getenv("TRACE_CHUNK_SIZE", "200"))
+    trace_pacing_seconds = float(os.getenv("TRACE_PACING_SECONDS", "0.25"))
+
     trace_conn = get_trace_connection()
     mysql_conn = get_mysql_connection()
-
-    cache: Dict[str, Optional[Tuple[str, str]]] = {}
 
     select_sql = """
         SELECT
@@ -162,57 +194,78 @@ def main() -> None:
     """.strip()
 
     try:
+        # 1) Load rows needing backfill
         with mysql_conn.cursor() as cur:
             cur.execute(select_sql)
             rows = cur.fetchall()
 
         print(f"Rows needing FA/Artikel backfill: {len(rows)}")
+        if not rows:
+            return
 
-        updated = 0
+        # 2) Decide barcode per row (prefer top, else bottom)
+        row_barcode: Dict[int, str] = {}
+        barcodes: List[str] = []
+
         skipped_no_barcode = 0
+        for (row_id, board_top, board_bottom, _fa_old, _art_old) in rows:
+            top = _norm_s(board_top)
+            bottom = _norm_s(board_bottom)
+            barcode = top if top else bottom
+            if not barcode:
+                skipped_no_barcode += 1
+                continue
+            row_barcode[int(row_id)] = barcode
+            barcodes.append(barcode)
+
+        if not barcodes:
+            print(f"Skipped (no barcode): {skipped_no_barcode}")
+            return
+
+        # 3) Batch + pace trace lookups
+        lookup = fetch_trace_info_for_barcodes_paced(
+            trace_conn,
+            barcodes,
+            chunk_size=trace_chunk_size,
+            pacing_seconds=trace_pacing_seconds,
+        )
+        print(f"Trace lookup results: {len(lookup)} (unique barcodes resolved)")
+
+        # 4) Apply updates (only fill missing fields)
+        updated = 0
         skipped_not_found = 0
 
         with mysql_conn.cursor() as cur:
-            for (row_id, board_top, board_bottom, fa_old, art_old) in rows:
-                top = _norm_s(board_top)
-                bottom = _norm_s(board_bottom)
-
-                # prefer top; fallback to bottom
-                barcode = top if top else bottom
+            for (row_id, _top, _bottom, fa_old, art_old) in rows:
+                row_id_i = int(row_id)
+                barcode = row_barcode.get(row_id_i)
                 if not barcode:
-                    skipped_no_barcode += 1
                     continue
 
-                if barcode in cache:
-                    info = cache[barcode]
-                else:
-                    info = fetch_losname_und_leiterplatte(trace_conn, barcode)
-                    cache[barcode] = info
-
+                info = lookup.get(barcode)
                 if not info:
                     skipped_not_found += 1
                     continue
 
                 losname, leiterplatte = info
 
-                # Only fill missing fields, keep existing non-empty values
                 fa_new = _norm_s(fa_old) or _norm_s(losname)
                 art_new = _norm_s(art_old) or _norm_s(leiterplatte)
 
-                # If still empty, nothing to update
+                # nothing to set
                 if not fa_new and not art_new:
                     skipped_not_found += 1
                     continue
 
-                cur.execute(update_sql, (fa_new, art_new, row_id))
+                cur.execute(update_sql, (fa_new, art_new, row_id_i))
                 updated += 1
 
-            mysql_conn.commit()
+        mysql_conn.commit()
 
         print(f"Updated rows: {updated}")
         print(f"Skipped (no barcode): {skipped_no_barcode}")
         print(f"Skipped (not found in trace): {skipped_not_found}")
-        print(f"Cache size: {len(cache)}")
+        print(f"Pacing: chunk_size={trace_chunk_size}, sleep={trace_pacing_seconds}s")
 
     except Exception as e:
         mysql_conn.rollback()
