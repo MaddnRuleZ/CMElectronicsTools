@@ -49,6 +49,17 @@ START_ROW = 7
 BOARD_TOP_IDX = 1
 BOARD_BOTTOM_IDX = 2
 
+# =========================
+# OPTIONAL HARD-CODED DATE FILTER (UPLOAD ONLY "YOUNGER" ROWS)
+# =========================
+# Set to None to disable filtering (uploads everything)
+#UPLOAD_ONLY_NEWER_THAN_STR: Optional[str] = None
+# Example values:
+UPLOAD_ONLY_NEWER_THAN_STR = "06.12.2025"
+
+DATE_FILTER_FIELD = "board_erfasst_am"          # which payload field to filter on
+INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING = False  # if True, keeps rows where the date is missing
+
 # ---------- Excel -> DB column mapping by POSITION ----------
 EXCEL_TO_DB_BY_INDEX: List[Tuple[int, str]] = [
     (0,  "board_erfasst_am"),
@@ -117,17 +128,14 @@ def clear_target_table(conn, table: str = "circuit_boards") -> None:
     with conn.cursor() as cur:
         try:
             cur.execute(f"TRUNCATE TABLE `{table}`;")
-        except Exception as e:
-            # TRUNCATE can fail if there are foreign key references
+        except Exception:
             conn.rollback()
             cur.execute(f"DELETE FROM `{table}`;")
-            # optional: reset autoincrement after DELETE
             try:
                 cur.execute(f"ALTER TABLE `{table}` AUTO_INCREMENT = 1;")
             except Exception:
                 pass
     conn.commit()
-
 
 # Datetime fields we parse
 DATETIME_FIELDS = {"board_erfasst_am", "end_erfasst_am"}
@@ -270,6 +278,48 @@ def build_upsert_sql(columns: List[str]) -> str:
     """.strip()
     return sql
 
+def apply_date_filter(payloads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not UPLOAD_ONLY_NEWER_THAN_STR:
+        return payloads
+
+    cutoff = coerce_datetime(UPLOAD_ONLY_NEWER_THAN_STR)
+    if cutoff is None:
+        print(
+            f"Invalid UPLOAD_ONLY_NEWER_THAN_STR={UPLOAD_ONLY_NEWER_THAN_STR!r}. "
+            f"Use formats like '2025-01-01' or '01.01.2025'.",
+            file=sys.stderr,
+        )
+        sys.exit(4)
+
+    before = len(payloads)
+    kept: List[Dict[str, Any]] = []
+
+    for p in payloads:
+        dt = p.get(DATE_FILTER_FIELD)
+
+        if dt is None:
+            if INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING:
+                kept.append(p)
+            continue
+
+        if not isinstance(dt, datetime):
+            dt = coerce_datetime(dt)
+
+        if dt is None:
+            if INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING:
+                kept.append(p)
+            continue
+
+        # "younger than cutoff" => recorded on/after cutoff
+        if dt >= cutoff:
+            kept.append(p)
+
+    print(
+        f"Date filter enabled: keeping {len(kept)}/{before} rows where "
+        f"{DATE_FILTER_FIELD} >= {cutoff.isoformat(sep=' ', timespec='seconds')}"
+    )
+    return kept
+
 def main():
     print("Loading Env")
     load_dotenv()
@@ -282,6 +332,13 @@ def main():
 
     if not payloads:
         print("No rows found after parsing.")
+        return
+
+    # Apply optional hard-coded date filter
+    payloads = apply_date_filter(payloads)
+
+    if not payloads:
+        print("No rows left after applying the date filter.")
         return
 
     all_columns = sorted(set().union(*[set(p.keys()) for p in payloads]))

@@ -4,12 +4,17 @@ from __future__ import annotations
 import os
 import sys
 import time
-from typing import Dict, Optional, Tuple, List, Iterable
+from datetime import datetime
+from typing import Dict, Optional, Tuple, List, Iterable, Any
 
 from dotenv import load_dotenv
 import pyodbc
 import pymysql
 import re
+import pandas as pd
+
+
+
 
 TRACE_SQL = """
 WITH ranked AS (
@@ -37,6 +42,62 @@ FROM ranked
 WHERE rn = 1;
 """.strip()
 
+# =========================
+# OPTIONAL HARD-CODED DATE FILTER (PROCESS ONLY "YOUNGER" ROWS)
+# =========================
+# Set to None to disable filtering (process all rows that need backfill)
+ONLY_PROCESS_NEWER_THAN_STR: Optional[str] = None
+# Example values:
+UPLOAD_ONLY_NEWER_THAN_STR = "06.12.2025"
+
+DATE_FIELD_IN_MYSQL = "board_erfasst_am"
+INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING = False
+
+
+def _coerce_excel_serial(val) -> Optional[datetime]:
+    try:
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 59:
+            return pd.to_datetime(val, unit="D", origin="1899-12-30").to_pydatetime()
+    except Exception:
+        pass
+    return None
+
+def coerce_datetime(val: Any) -> Optional[datetime]:
+    if val is None or (isinstance(val, str) and val.strip() == ""):
+        return None
+
+    if isinstance(val, datetime):
+        return val
+
+    # sometimes MySQL returns date/datetime as string or python datetime already
+    ser = _coerce_excel_serial(val)
+    if ser:
+        return ser
+
+    s = str(val).strip()
+
+    # MM/DD/YYYY first
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    # German day-first
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    # ISO/other
+    try:
+        return pd.to_datetime(s, dayfirst=False, errors="raise").to_pydatetime()
+    except Exception:
+        pass
+    try:
+        return pd.to_datetime(s, dayfirst=True, errors="raise").to_pydatetime()
+    except Exception:
+        return None
+
 def _clean_barcode(v) -> str:
     # strip + collapse all whitespace (incl \r\n\t and weird spaces) + uppercase
     s = "" if v is None else str(v)
@@ -59,17 +120,14 @@ def _strip_before_backslash(s: str) -> str:
         return s.split("\\", 1)[1].strip()
     return s
 
-
 def _norm_s(v) -> str:
     if v is None:
         return ""
     return str(v).strip()
 
-
 def _chunked(items: List[str], size: int) -> Iterable[List[str]]:
     for i in range(0, len(items), size):
         yield items[i : i + size]
-
 
 def get_trace_connection() -> pyodbc.Connection:
     host = os.getenv("TRACE_HOST")
@@ -98,7 +156,6 @@ def get_trace_connection() -> pyodbc.Connection:
         f"TrustServerCertificate={trust_cert};"
     )
     return pyodbc.connect(conn_str, autocommit=True)
-
 
 def fetch_trace_info_for_barcodes_paced(
     conn: pyodbc.Connection,
@@ -159,7 +216,6 @@ def fetch_trace_info_for_barcodes_paced(
 
     return out
 
-
 def get_mysql_connection():
     host = os.getenv("DB_HOST", "localhost")
     port = int(os.getenv("DB_PORT", "3306"))
@@ -185,6 +241,42 @@ def get_mysql_connection():
         print(f"MySQL connection error: {e}", file=sys.stderr)
         sys.exit(2)
 
+def _apply_row_date_filter(rows: List[Tuple[Any, ...]], date_idx: int) -> List[Tuple[Any, ...]]:
+    """
+    Keep only rows where rows[*][date_idx] >= cutoff (i.e. 'younger').
+    """
+    if not ONLY_PROCESS_NEWER_THAN_STR:
+        return rows
+
+    cutoff = coerce_datetime(ONLY_PROCESS_NEWER_THAN_STR)
+    if cutoff is None:
+        print(
+            f"Invalid ONLY_PROCESS_NEWER_THAN_STR={ONLY_PROCESS_NEWER_THAN_STR!r}. "
+            f"Use formats like '2025-01-01' or '01.01.2025'.",
+            file=sys.stderr,
+        )
+        sys.exit(4)
+
+    before = len(rows)
+    kept: List[Tuple[Any, ...]] = []
+
+    for r in rows:
+        dt_raw = r[date_idx]
+        dt = coerce_datetime(dt_raw)
+
+        if dt is None:
+            if INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING:
+                kept.append(r)
+            continue
+
+        if dt >= cutoff:
+            kept.append(r)
+
+    print(
+        f"Date filter enabled: keeping {len(kept)}/{before} rows where "
+        f"{DATE_FIELD_IN_MYSQL} >= {cutoff.isoformat(sep=' ', timespec='seconds')}"
+    )
+    return kept
 
 def main() -> None:
     load_dotenv()
@@ -195,13 +287,15 @@ def main() -> None:
     trace_conn = get_trace_connection()
     mysql_conn = get_mysql_connection()
 
-    select_sql = """
+    # NOTE: added board_erfasst_am so we can filter by date
+    select_sql = f"""
         SELECT
             id,
             board_top,
             board_bottom,
             board_fa_nummer,
-            board_artikel_nummer
+            board_artikel_nummer,
+            {DATE_FIELD_IN_MYSQL}
         FROM circuit_boards
         WHERE
             (board_fa_nummer IS NULL OR TRIM(board_fa_nummer) = '')
@@ -221,17 +315,20 @@ def main() -> None:
             cur.execute(select_sql)
             rows = cur.fetchall()
 
-        print(f"Rows needing FA/Artikel backfill: {len(rows)}")
+        # 1b) Apply optional hard-coded date filter (board_erfasst_am)
+        # rows tuple layout: (id, top, bottom, fa_old, art_old, board_erfasst_am)
+        rows = _apply_row_date_filter(rows, date_idx=5)
+
+        print(f"Rows needing FA/Artikel backfill (after date filter): {len(rows)}")
         if not rows:
             return
 
         # 2) Decide barcode per row (prefer top, else bottom)
-        row_barcode: Dict[int, str] = {}
         barcodes: List[str] = []
         row_candidates: Dict[int, List[str]] = {}
 
         skipped_no_barcode = 0
-        for (row_id, board_top, board_bottom, _fa_old, _art_old) in rows:
+        for (row_id, board_top, board_bottom, _fa_old, _art_old, _dt) in rows:
             row_id_i = int(row_id)
 
             # prefer top; fallback to bottom
@@ -264,15 +361,13 @@ def main() -> None:
         skipped_not_found = 0
 
         with mysql_conn.cursor() as cur:
-            for (row_id, _top, _bottom, fa_old, art_old) in rows:
+            for (row_id, _top, _bottom, fa_old, art_old, _dt) in rows:
                 row_id_i = int(row_id)
                 cands = row_candidates.get(row_id_i) or []
                 info = None
-                used = ""
                 for bc in cands:
                     info = lookup.get(bc)
                     if info:
-                        used = bc
                         break
 
                 if not info:
@@ -282,13 +377,13 @@ def main() -> None:
                 losname, leiterplatte = info
 
                 fa_old_s = _norm_s(fa_old)
-                art_old_s = _strip_before_backslash(_norm_s(art_old))  # <-- normalize existing value too
+                art_old_s = _strip_before_backslash(_norm_s(art_old))  # normalize existing value too
 
                 fa_new = fa_old_s or _norm_s(losname)
 
                 # prefer existing, else trace; always strip prefix before "\"
                 art_candidate = art_old_s or _norm_s(leiterplatte)
-                art_new = _strip_before_backslash(art_candidate)  # <-- normalize final value
+                art_new = _strip_before_backslash(art_candidate)
 
                 if not fa_new and not art_new:
                     skipped_not_found += 1
@@ -317,7 +412,6 @@ def main() -> None:
             trace_conn.close()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()
