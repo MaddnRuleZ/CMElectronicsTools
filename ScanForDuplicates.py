@@ -40,22 +40,40 @@ def get_connection():
 def main() -> None:
     conn = get_connection()
     try:
-        # MySQL 8+ (CTEs). If you’re on MySQL 5.7, tell me and I’ll rewrite without CTEs.
+        # MySQL 8+ (CTEs). If you're on MySQL 5.7, I can rewrite without CTEs.
         sql = """
 WITH vals AS (
     SELECT
-        id,
+        cb.id,
+        cb.board_erfasst_am,
+        cb.board_recorded_on,
         'board_top' AS src,
-        TRIM(board_top) AS num
-    FROM circuit_boards
-    WHERE board_top IS NOT NULL AND TRIM(board_top) <> ''
+        TRIM(cb.board_top) AS num,
+        cb.board_top,
+        cb.board_bottom,
+        cb.board_ok,
+        cb.board_fa_nummer,
+        cb.board_artikel_nummer,
+        cb.board_erfasst_durch
+    FROM circuit_boards cb
+    WHERE cb.board_top IS NOT NULL AND TRIM(cb.board_top) <> ''
+
     UNION ALL
+
     SELECT
-        id,
+        cb.id,
+        cb.board_erfasst_am,
+        cb.board_recorded_on,
         'board_bottom' AS src,
-        TRIM(board_bottom) AS num
-    FROM circuit_boards
-    WHERE board_bottom IS NOT NULL AND TRIM(board_bottom) <> ''
+        TRIM(cb.board_bottom) AS num,
+        cb.board_top,
+        cb.board_bottom,
+        cb.board_ok,
+        cb.board_fa_nummer,
+        cb.board_artikel_nummer,
+        cb.board_erfasst_durch
+    FROM circuit_boards cb
+    WHERE cb.board_bottom IS NOT NULL AND TRIM(cb.board_bottom) <> ''
 ),
 dups AS (
     SELECT
@@ -68,27 +86,19 @@ dups AS (
     HAVING COUNT(*) > 1
 )
 SELECT
-    cb.*,
-    d.num AS duplicate_number,
+    v.*,
     d.total_count,
     d.top_count,
     d.bottom_count,
-    (TRIM(cb.board_top) = d.num) AS match_top,
-    (TRIM(cb.board_bottom) = d.num) AS match_bottom,
     CASE
-        WHEN d.top_count > 1 AND d.bottom_count > 1 THEN 'duplicate_in_board_top;duplicate_in_board_bottom;appears_in_both_columns'
-        WHEN d.top_count > 1 AND d.bottom_count > 0 THEN 'duplicate_in_board_top;appears_in_both_columns'
-        WHEN d.bottom_count > 1 AND d.top_count > 0 THEN 'duplicate_in_board_bottom;appears_in_both_columns'
+        WHEN d.top_count > 0 AND d.bottom_count > 0 THEN 'appears_in_both_columns'
         WHEN d.top_count > 1 THEN 'duplicate_in_board_top'
         WHEN d.bottom_count > 1 THEN 'duplicate_in_board_bottom'
-        WHEN d.top_count > 0 AND d.bottom_count > 0 THEN 'appears_in_both_columns'
         ELSE 'duplicate_across_union'
     END AS reason
-FROM circuit_boards cb
-JOIN dups d
-  ON TRIM(cb.board_top) = d.num
-  OR TRIM(cb.board_bottom) = d.num
-ORDER BY d.total_count DESC, d.num ASC, cb.id ASC;
+FROM vals v
+JOIN dups d ON d.num = v.num
+ORDER BY v.board_erfasst_am ASC, v.num ASC, v.id ASC, v.src ASC;
         """.strip()
 
         offending = pd.read_sql(sql, conn)
@@ -98,11 +108,10 @@ ORDER BY d.total_count DESC, d.num ASC, cb.id ASC;
             return
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = os.path.abspath(f"db_board_number_invariant_violations_{ts}.csv")
+        out_path = os.path.abspath(f"db_board_number_duplicates_{ts}.csv")
         offending.to_csv(out_path, index=False, encoding="utf-8")
 
-        dup_count = offending["duplicate_number"].nunique() if "duplicate_number" in offending.columns else "?"
-        print(f"VIOLATION: Found duplicates (unique numbers): {dup_count}")
+        print(f"VIOLATION: {offending['num'].nunique()} duplicate numbers, {len(offending)} total occurrences.")
         print(f"Wrote CSV: {out_path}")
 
     finally:
