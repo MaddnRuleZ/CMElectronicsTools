@@ -274,7 +274,7 @@ def main():
     print("Loading Env")
     load_dotenv()
     print("Loaded env, generating Payloads")
-    df = read_excel_as_dataframe(FILE, SHEET, START_ROW).head(50)
+    df = read_excel_as_dataframe(FILE, SHEET, START_ROW)
 
     payloads: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
