@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
-from __future__ import annotations
-
-import os
 import sys
-from typing import Optional, Tuple, List, Dict
 
 from dotenv import load_dotenv
+import os
 import pyodbc
-
+from typing import Optional, Tuple
 
 TRACE_SQL = """
 WITH ranked AS (
@@ -19,12 +15,12 @@ WITH ranked AS (
             PARTITION BY tp.Barcode
             ORDER BY td.EndDate DESC, td.BeginDate DESC, td.Id DESC
         ) AS rn
-    FROM [vTracePanel5] tp
-    INNER JOIN [vTraceData5] td ON td.Id = tp.TraceDataId
-    INNER JOIN [vTraceJob5]  tj ON tj.TraceDataId = td.Id
-    INNER JOIN [vJob5]        j ON j.Id = tj.JobId
-    LEFT  JOIN [vOrder5]      o ON o.Id = j.OrderId
-    LEFT  JOIN [vBoard5]      b ON b.Id = j.BoardId
+    FROM [dbo].[vTracePanel5] tp
+    INNER JOIN [dbo].[vTraceData5] td ON td.Id = tp.TraceDataId
+    INNER JOIN [dbo].[vTraceJob5]  tj ON tj.TraceDataId = td.Id
+    INNER JOIN [dbo].[vJob5]        j ON j.Id = tj.JobId
+    LEFT  JOIN [dbo].[vOrder5]      o ON o.Id = j.OrderId
+    LEFT  JOIN [dbo].[vBoard5]      b ON b.Id = j.BoardId
     WHERE tp.Barcode IN ({placeholders})
 )
 SELECT
@@ -37,18 +33,10 @@ WHERE rn = 1;
 
 
 def get_trace_connection() -> pyodbc.Connection:
-    """
-    Expects .env like:
-      TRACE_HOST=...
-      TRACE_USER=...
-      TRACE_PASSWORD=...
-      TRACE_DRIVER=ODBC Driver 18 for SQL Server
-      TRACE_ENCRYPT=yes
-      TRACE_TRUST_CERT=yes
-    """
     load_dotenv()
 
     host = os.getenv("TRACE_HOST")
+    db = os.getenv("TRACE_DB")
     user = os.getenv("TRACE_USER")
     password = os.getenv("TRACE_PASSWORD")
 
@@ -57,33 +45,30 @@ def get_trace_connection() -> pyodbc.Connection:
     trust_cert = os.getenv("TRACE_TRUST_CERT", "yes")
 
     if not host:
-        raise RuntimeError("TRACE_HOST missing in env (.env).")
+        raise RuntimeError("TRACE_HOST missing in .env")
+    if not db:
+        raise RuntimeError("TRACE_DB missing in .env")
     if not user or not password:
-        raise RuntimeError("TRACE_USER / TRACE_PASSWORD missing in env (.env).")
+        raise RuntimeError("TRACE_USER / TRACE_PASSWORD missing in .env")
 
     conn_str = (
         f"DRIVER={{{driver}}};"
         f"SERVER={host};"
+        f"DATABASE={db};"
         f"UID={user};"
         f"PWD={password};"
         f"Encrypt={encrypt};"
         f"TrustServerCertificate={trust_cert};"
     )
-
-    # autocommit is fine for read-only queries
     return pyodbc.connect(conn_str, autocommit=True)
 
 
 def fetch_losname_und_leiterplatte(conn: pyodbc.Connection, barcode: str) -> Optional[Tuple[str, str]]:
-    """
-    Returns (Losname, Leiterplatte) for the given barcode, or None if not found.
-    """
     bc = (barcode or "").strip()
     if not bc:
         return None
 
-    placeholders = "?"
-    sql = TRACE_SQL.format(placeholders=placeholders)
+    sql = TRACE_SQL.format(placeholders="?")
 
     cur = conn.cursor()
     cur.execute(sql, (bc,))
@@ -92,11 +77,9 @@ def fetch_losname_und_leiterplatte(conn: pyodbc.Connection, barcode: str) -> Opt
         return None
 
     _barcode, losname, leiterplatte = row
-    los = losname.strip() if isinstance(losname, str) else losname
-    lei = leiterplatte.strip() if isinstance(leiterplatte, str) else leiterplatte
-
-    # ensure return type is str (or empty string if NULL)
-    return ("" if los is None else str(los), "" if lei is None else str(lei))
+    los = losname.strip() if isinstance(losname, str) else ("" if losname is None else str(losname))
+    lei = leiterplatte.strip() if isinstance(leiterplatte, str) else ("" if leiterplatte is None else str(leiterplatte))
+    return (los, lei)
 
 
 def main() -> None:
