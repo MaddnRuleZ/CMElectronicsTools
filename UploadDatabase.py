@@ -41,7 +41,8 @@ WHERE rn = 1;
 # =========================
 # HARD-CODED EXAMPLES
 # =========================
-FILE = "/root/Tab01/files/TAB01__Lpl-Seriennummern.xlsm"
+#FILE = "/root/Tab01/files/TAB01__Lpl-Seriennummern.xlsm"
+FILE = "/home/maddin/Downloads/22.10.25/TAB01__Lpl-Seriennummern.xlsm"
 SHEET = "Leiterplatten"
 START_ROW = 7
 
@@ -53,9 +54,9 @@ BOARD_BOTTOM_IDX = 2
 # OPTIONAL HARD-CODED DATE FILTER (UPLOAD ONLY "YOUNGER" ROWS)
 # =========================
 # Set to None to disable filtering (uploads everything)
-#UPLOAD_ONLY_NEWER_THAN_STR: Optional[str] = None
+UPLOAD_ONLY_NEWER_THAN_STR: Optional[str] = None
 # Example values:
-UPLOAD_ONLY_NEWER_THAN_STR = "17.12.2025"
+#UPLOAD_ONLY_NEWER_THAN_STR = "17.12.2025"
 
 DATE_FILTER_FIELD = "board_erfasst_am"          # which payload field to filter on
 INCLUDE_ROWS_WITHOUT_DATE_WHEN_FILTERING = False  # if True, keeps rows where the date is missing
