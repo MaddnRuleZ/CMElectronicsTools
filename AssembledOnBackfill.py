@@ -285,8 +285,10 @@ def main() -> None:
 
         # 4) Apply updates (only board_assembled_on)
         updated = 0
-        skipped_not_found = 0
+        set_default_1900 = 0
         skipped_no_timestamp = 0
+
+        DEFAULT_ASSEMBLY_DATE = datetime(1900, 1, 1)
 
         with mysql_conn.cursor() as cur:
             for (row_id, _top, _bottom, assembled_old, _dt) in rows:
@@ -304,8 +306,10 @@ def main() -> None:
                         break
 
                 if assembled_on is None:
-                    # differentiate "barcode not found at all" vs "found but null enddate" is hard here; treat as missing
-                    skipped_not_found += 1
+                    # barcode not found in trace -> set default 1900-01-01
+                    cur.execute(update_sql, (DEFAULT_ASSEMBLY_DATE, row_id_i))
+                    updated += 1
+                    set_default_1900 += 1
                     continue
 
                 if not isinstance(assembled_on, datetime):
@@ -318,11 +322,11 @@ def main() -> None:
                 cur.execute(update_sql, (assembled_on, row_id_i))
                 updated += 1
 
+
         mysql_conn.commit()
 
         print(f"Updated rows: {updated}")
         print(f"Skipped (no barcode): {skipped_no_barcode}")
-        print(f"Skipped (not found in trace / no match): {skipped_not_found}")
         print(f"Skipped (no assembly timestamp): {skipped_no_timestamp}")
         print(f"Pacing: chunk_size={trace_chunk_size}, sleep={trace_pacing_seconds}s")
 
