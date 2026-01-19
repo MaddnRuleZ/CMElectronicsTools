@@ -10,34 +10,6 @@ from dotenv import load_dotenv
 import pandas as pd
 import pyodbc
 import pymysql
-
-
-TRACE_SQL = """
-WITH ranked AS (
-    SELECT
-        tp.Barcode AS Barcode,
-        o.Name     AS Losname,
-        b.Name     AS Leiterplatte,
-        ROW_NUMBER() OVER (
-            PARTITION BY tp.Barcode
-            ORDER BY td.EndDate DESC, td.BeginDate DESC, td.Id DESC
-        ) AS rn
-    FROM [vTracePanel5] tp
-    INNER JOIN [vTraceData5] td ON td.Id = tp.TraceDataId
-    INNER JOIN [vTraceJob5]  tj ON tj.TraceDataId = td.Id
-    INNER JOIN [vJob5]        j ON j.Id = tj.JobId
-    LEFT  JOIN [vOrder5]      o ON o.Id = j.OrderId
-    LEFT  JOIN [vBoard5]      b ON b.Id = j.BoardId
-    WHERE tp.Barcode IN ({placeholders})
-)
-SELECT
-    Barcode,
-    Losname,
-    Leiterplatte
-FROM ranked
-WHERE rn = 1;
-""".strip()
-
 # =========================
 # HARD-CODED EXAMPLES
 # =========================
